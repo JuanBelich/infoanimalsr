@@ -1,0 +1,6 @@
+{
+  "name": "InfoAnimal",
+  "description": "Aplicación comunitaria de reporte, búsqueda y rescate de mascotas con integración de mapa, veterinarias, campañas y noticias.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
