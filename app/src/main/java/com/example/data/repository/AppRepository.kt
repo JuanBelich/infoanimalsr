@@ -5,9 +5,12 @@ import android.util.Log
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.example.data.local.AppDatabase
 import com.example.data.model.*
-import com.example.data.network.*
+import com.example.data.local.AppDatabase
+import com.example.data.network.ApiClient
+import com.example.data.network.PocketBaseClient
+import com.example.data.network.toEntity
+import com.example.data.network.parsePbDate
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.util.UUID
@@ -63,174 +66,299 @@ class AppRepository(
                 val response = ApiClient.getService().getUserProfile("eq.$userId")
                 if (response.isSuccessful && !response.body().isNullOrEmpty()) {
                     val user = response.body()!!.first()
-                    val userEntity = user.toEntity()
+                    val userEntity = UserEntity(
+                        id = user.id,
+                        email = user.email ?: "",
+                        nombre = user.nombre ?: "",
+                        telefono = user.telefono ?: "",
+                        zonaPrincipal = user.zonaPrincipal ?: "San Rafael",
+                        rol = user.rol ?: "user",
+                        fotoPerfil = user.fotoPerfil ?: "avatar_placeholder",
+                        fotoPortada = if (!user.fotoPortada.isNullOrBlank()) user.fotoPortada else "gradient_blue",
+                        biografia = user.biografia ?: ""
+                    )
                     _currentUser.value = userEntity
-                    Log.d("AppRepository", "initSession: Perfil recuperado para $userId")
+                    Log.d("AppRepository", "initSession: Perfil recuperado de Supabase para $userId")
                     syncAll()
                 } else {
-                    Log.d("AppRepository", "initSession: Falló recuperación de sesión")
+                    Log.e("AppRepository", "initSession: Falló la recuperación del perfil desde Supabase. Código: ${response.code()}")
                     context.dataStore.edit { it.remove(KEY_USER_ID) }
-                    syncAll()
+                    syncAll() // Sincronizamos datos públicos para que la app no quede vacía
                 }
             } catch (e: Exception) {
-                Log.d("AppRepository", "initSession: Error conectando a backend", e)
+                Log.e("AppRepository", "initSession: Error al conectarse a Supabase", e)
                 context.dataStore.edit { it.remove(KEY_USER_ID) }
-                syncAll()
+                syncAll() // Sincronizamos datos públicos igualmente
             }
         } ?: run {
-            Log.d("AppRepository", "initSession: No hay sesión guardada")
-            syncAll()
+            Log.d("AppRepository", "initSession: No hay sesión activa guardada. Iniciando sincronización de datos públicos...")
+            syncAll() // Sincronizamos datos públicos (Posts, Veterinarias, Campañas, Noticias) para usuario Invitado
         }
     }
 
     suspend fun login(email: String, password: String): Boolean {
         try {
-            val response = ApiClient.getService().login(
-                mapOf("email" to email, "password" to password)
+            val response = PocketBaseClient.getService().login(
+                mapOf("identity" to email, "password" to password)
             )
             if (response.isSuccessful && response.body() != null) {
                 val auth = response.body()!!
-                ApiClient.token = auth.accessToken
-                PocketBaseClient.token = auth.accessToken
-
-                val profResponse = ApiClient.getService().getUserProfile("eq.${auth.user.id}")
-                val userEntity = if (profResponse.isSuccessful && !profResponse.body().isNullOrEmpty()) {
-                    profResponse.body()!!.first().toEntity()
-                } else {
-                    UserEntity(
-                        id = auth.user.id,
-                        email = auth.user.email ?: email,
-                        nombre = email.substringBefore("@"),
-                        rol = if (email.contains("admin")) "admin" else "user"
-                    )
-                }
-
+                PocketBaseClient.saveAuth(context, auth.token, auth.record)
+                
+                val userEntity = auth.record.toEntity()
                 _currentUser.value = userEntity
                 context.dataStore.edit { prefs ->
                     prefs[KEY_USER_ID] = userEntity.id
                 }
-
+                Log.d("AppRepository", "login: Inicio de sesión exitoso. Iniciando sincronización en segundo plano...")
+                // Iniciar sincronización secundaria en segundo plano para no demorar la navegación inmediata
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
                         syncAll()
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        Log.e("AppRepository", "Error en syncAll en segundo plano tras login", e)
+                    }
                 }
                 return true
             } else {
-                throw Exception("Credenciales incorrectas")
+                val errStr = response.errorBody()?.string() ?: "Error desconocido"
+                Log.e("AppRepository", "login: Error de autenticación: $errStr")
+                throw Exception(errStr)
             }
         } catch (e: Exception) {
+            Log.e("AppRepository", "login: Excepción al iniciar sesión", e)
             throw e
         }
     }
 
     suspend fun signup(email: String, name: String, phone: String, password: String): UserEntity {
-        val assignedRol = when {
-            email.contains("superadmin", ignoreCase = true) -> "super_admin"
-            email.contains("admin", ignoreCase = true) -> "admin"
-            email.contains("ong", ignoreCase = true) -> "ong"
-            else -> "user"
+        val assignedRol = if (email.endsWith("@infoanimals.com", ignoreCase = true)) {
+            when {
+                email.contains("superadmin", ignoreCase = true) -> "super_admin"
+                email.contains("admin", ignoreCase = true) -> "admin"
+                email.contains("ong", ignoreCase = true) -> "ong"
+                else -> "user"
+            }
+        } else {
+            "user"
         }
         val signupData = mapOf(
             "email" to email,
             "password" to password,
-            "data" to mapOf(
-                "nombre" to name,
-                "telefono" to phone,
-                "rol" to assignedRol,
-                "zona_principal" to "San Rafael"
-            )
+            "passwordConfirm" to password,
+            "nombre" to name,
+            "telefono" to phone,
+            "rol" to assignedRol,
+            "bloqueado" to false
         )
-
+        
         try {
-            val response = ApiClient.getService().signup(signupData)
+            val response = PocketBaseClient.getService().signup(signupData)
             if (response.isSuccessful && response.body() != null) {
                 val user = response.body()!!
-                val userEntity = UserEntity(
-                    id = user.id,
-                    email = email,
-                    nombre = name,
-                    telefono = phone,
-                    zonaPrincipal = "San Rafael",
-                    rol = assignedRol
-                )
-                try {
-                    ApiClient.getService().insertUserProfile(
-                        mapOf(
-                            "id" to user.id,
-                            "email" to email,
-                            "nombre" to name,
-                            "telefono" to phone,
-                            "rol" to assignedRol,
-                            "zona_principal" to "San Rafael"
-                        )
-                    )
-                } catch (_: Exception) {}
-
+                val userEntity = user.toEntity()
+                Log.d("AppRepository", "signup: Registro exitoso en Supabase")
                 try {
                     login(email, password)
-                } catch (_: Exception) {}
+                } catch (loginEx: Exception) {
+                    Log.e("AppRepository", "signup: El inicio de sesión automático falló pero la cuenta se creó correctamente", loginEx)
+                }
                 return userEntity
             } else {
-                throw Exception("Error de registro")
+                val errorMsg = response.errorBody()?.string() ?: ""
+                Log.e("AppRepository", "signup: Falló el registro: $errorMsg")
+                throw Exception("Error de registro en Supabase: $errorMsg")
             }
         } catch (e: Exception) {
+            Log.e("AppRepository", "signup: Excepción en el registro", e)
             throw e
         }
     }
 
     suspend fun logout() {
+        Log.d("AppRepository", "logout: Cerrando sesión y limpiando datos locales")
+        PocketBaseClient.clearAuth(context)
         _currentUser.value = null
-        ApiClient.token = null
-        PocketBaseClient.token = null
-        context.dataStore.edit { it.remove(KEY_USER_ID) }
-        syncAll()
+        context.dataStore.edit { prefs ->
+            prefs.remove(KEY_USER_ID)
+        }
+        _posts.value = emptyList()
+        _veterinarias.value = emptyList()
+        _campaigns.value = emptyList()
+        _news.value = emptyList()
+        _statuses.value = emptyList()
+        _colaboradores.value = emptyList()
+        _blockedUsers.value = emptyList()
+        _notifications.value = emptyList()
+        _reports.value = emptyList()
+        _profileReports.value = emptyList()
+        try {
+            syncPosts()
+        } catch (e: Exception) {
+            Log.e("AppRepository", "Error re-syncing public posts post-logout", e)
+        }
     }
 
-    suspend fun updateUserProfile(
-        nombre: String,
-        telefono: String,
-        zonaPrincipal: String,
-        biografia: String,
-        fotoPerfil: String,
-        fotoPortada: String
-    ): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        val updated = user.copy(
-            nombre = nombre,
-            telefono = telefono,
-            zonaPrincipal = zonaPrincipal,
-            biografia = biografia,
-            fotoPerfil = fotoPerfil,
-            fotoPortada = fotoPortada
+    suspend fun requestPasswordReset(email: String): Boolean {
+        return try {
+            val response = PocketBaseClient.getService().requestPasswordReset(mapOf("email" to email))
+            if (response.isSuccessful) {
+                Log.d("AppRepository", "requestPasswordReset: Solicitud enviada exitosamente")
+                true
+            } else {
+                Log.e("AppRepository", "requestPasswordReset: Error: ${response.errorBody()?.string()}")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "requestPasswordReset: Excepción", e)
+            false
+        }
+    }
+
+    suspend fun updateProfile(name: String, bio: String, phone: String, zone: String) {
+        val current = _currentUser.value ?: return
+        val updated = current.copy(
+            nombre = name,
+            biografia = bio,
+            telefono = phone,
+            zonaPrincipal = zone
         )
         _currentUser.value = updated
         try {
             appDao.insertUser(updated)
-        } catch (_: Exception) {}
-
-        return try {
-            ApiClient.getService().updateUserProfile(
-                "eq.${user.id}",
-                mapOf(
-                    "nombre" to nombre,
-                    "telefono" to telefono,
-                    "zona_principal" to zonaPrincipal,
-                    "biografia" to biografia,
-                    "foto_perfil" to fotoPerfil,
-                    "foto_portada" to fotoPortada
-                )
-            )
-            Result.success(true)
         } catch (e: Exception) {
-            Result.success(true)
+            Log.e("AppRepository", "Error updating user in Room DB", e)
+        }
+
+        val token = PocketBaseClient.token
+        if (!token.isNullOrBlank()) {
+            try {
+                val response = PocketBaseClient.getService().updateProfile(
+                    token = "Bearer $token",
+                    userId = current.id,
+                    body = mapOf(
+                        "nombre" to name,
+                        "biografia" to bio,
+                        "telefono" to phone,
+                        "zona_principal" to zone
+                    )
+                )
+                if (response.isSuccessful) {
+                    Log.d("AppRepository", "updateProfile: Perfil actualizado correctamente en Supabase")
+                    try { syncPosts() } catch (_: Exception) {}
+                } else {
+                    Log.e("AppRepository", "updateProfile: Error: ${response.errorBody()?.string()}")
+                }
+            } catch (e: Exception) {
+                Log.e("AppRepository", "updateProfile: Excepción", e)
+            }
+        }
+    }
+
+    suspend fun uploadAndUpdateAvatar(uri: android.net.Uri): Result<String> {
+        val user = _currentUser.value ?: return Result.failure(Exception("Debe iniciar sesión para cambiar la foto de perfil."))
+        val uploadResult = ApiClient.uploadProfileImage(context, user.id, uri, isCover = false)
+        if (uploadResult.isSuccess) {
+            val publicUrl = uploadResult.getOrThrow()
+            updateProfilePhotos(avatarUrl = publicUrl, coverUrl = null)
+            return Result.success(publicUrl)
+        } else {
+            return Result.failure(uploadResult.exceptionOrNull() ?: Exception("Error al subir foto de perfil"))
+        }
+    }
+
+    suspend fun uploadAndUpdateCover(uri: android.net.Uri): Result<String> {
+        val user = _currentUser.value ?: return Result.failure(Exception("Debe iniciar sesión para cambiar la foto de portada."))
+        val uploadResult = ApiClient.uploadProfileImage(context, user.id, uri, isCover = true)
+        if (uploadResult.isSuccess) {
+            val publicUrl = uploadResult.getOrThrow()
+            updateProfilePhotos(avatarUrl = null, coverUrl = publicUrl)
+            return Result.success(publicUrl)
+        } else {
+            return Result.failure(uploadResult.exceptionOrNull() ?: Exception("Error al subir foto de portada"))
+        }
+    }
+
+    suspend fun updateProfilePhotos(avatarUrl: String?, coverUrl: String?) {
+        val current = _currentUser.value ?: return
+        var updated = current
+        val updateMap = mutableMapOf<String, Any>()
+        if (avatarUrl != null) {
+            updated = updated.copy(fotoPerfil = avatarUrl)
+            updateMap["foto_perfil"] = avatarUrl
+        }
+        if (coverUrl != null) {
+            updated = updated.copy(fotoPortada = coverUrl)
+            updateMap["foto_portada"] = coverUrl
+        }
+        _currentUser.value = updated
+        try {
+            appDao.insertUser(updated)
+        } catch (e: Exception) {
+            Log.e("AppRepository", "Error updating user in Room DB", e)
+        }
+
+        val token = PocketBaseClient.token
+        if (!token.isNullOrBlank() && updateMap.isNotEmpty()) {
+            try {
+                val response = PocketBaseClient.getService().updateProfile(
+                    token = "Bearer $token",
+                    userId = current.id,
+                    body = updateMap
+                )
+                if (response.isSuccessful) {
+                    Log.d("AppRepository", "updateProfilePhotos: Fotos actualizadas en Supabase")
+                    try { syncPosts() } catch (_: Exception) {}
+                } else {
+                    Log.e("AppRepository", "updateProfilePhotos: Error: ${response.errorBody()?.string()}")
+                }
+            } catch (e: Exception) {
+                Log.e("AppRepository", "updateProfilePhotos: Excepción", e)
+            }
+        }
+    }
+
+    suspend fun registerSystemAccounts() {
+        val accountTypes = listOf(
+            Triple("admin@infoanimals.com", "Admin Central", "admin"),
+            Triple("ong@infoanimals.com", "Refugio Patitas", "ong"),
+            Triple("user@infoanimals.com", "Vecino Alvear", "user"),
+            Triple("superadmin@infoanimals.com", "Super Admin S.R.", "super_admin"),
+            Triple("admin_sr@infoanimals.com", "Admin San Rafael", "admin"),
+            Triple("ong_sr@infoanimals.com", "Refugio Patitas SR", "ong"),
+            Triple("user_sr@infoanimals.com", "Vecino San Rafael", "user"),
+            Triple("superadmin_sr@infoanimals.com", "Super Admin San Rafael", "super_admin")
+        )
+        for ((email, name, role) in accountTypes) {
+            try {
+                val signupData = mapOf(
+                    "email" to email,
+                    "password" to "Admin123!",
+                    "passwordConfirm" to "Admin123!",
+                    "nombre" to name,
+                    "telefono" to "2604123456",
+                    "rol" to role,
+                    "bloqueado" to false
+                )
+                val response = PocketBaseClient.getService().signup(signupData)
+                if (response.isSuccessful) {
+                    Log.d("AppRepository", "System account auto-registered: $email")
+                }
+            } catch (e: Exception) {
+                Log.e("AppRepository", "System account auto-registration failed for $email", e)
+            }
         }
     }
 
     suspend fun syncAll() {
-        try {
-            seedMockData()
-        } catch (_: Exception) {}
+        Log.d("AppRepository", "syncAll: Iniciando sincronización 100% ONLINE con Supabase")
+        if (com.example.BuildConfig.ENABLE_TEST_ROLE_MAPPING) {
+            try {
+                registerSystemAccounts()
+            } catch (e: Exception) {
+                Log.e("AppRepository", "System accounts auto-registration failed", e)
+            }
+        }
         try {
             syncPosts()
             syncVeterinarias()
@@ -243,496 +371,225 @@ class AppRepository(
             syncReports()
             syncProfileReports()
             syncNotifications()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e("AppRepository", "Complete synchronization failed", e)
+        }
     }
 
     suspend fun syncPosts() {
+        val activeToken = ApiClient.token
+        if (activeToken.isNullOrBlank()) {
+            Log.d("AppRepository", "syncPosts: Sincronizando publicaciones de forma pública (usuario invitado / sin token activo)")
+        }
+
         try {
-            val local = try { appDao.getAllPostsFlow().firstOrNull() ?: emptyList() } catch (_: Exception) { emptyList() }
-            if (local.isNotEmpty() && _posts.value.isEmpty()) {
-                _posts.value = local
-            }
-            val response = ApiClient.getService().getPosts()
+            // Bypass directo a apiService de Supabase para obtener las publicaciones 100% online
+            val response = PocketBaseClient.getService().getPosts(page = 1, perPage = 100)
             if (response.isSuccessful && response.body() != null) {
-                val remote = response.body()!!.map { it.toEntity() }
-                _posts.value = remote
+                val postEntities = response.body()!!.items.map { it.toEntity() }
+                
+                // Actualiza la UI de inmediato de forma online
+                _posts.value = postEntities
+                Log.d("AppRepository", "syncPosts: Sincronizadas online ${_posts.value.size} publicaciones exitosamente")
+
+                // Sincronización secundaria a Room en segundo plano para persistencia local offline
                 try {
-                    remote.forEach { appDao.insertPost(it) }
-                } catch (_: Exception) {}
-            }
-        } catch (e: Exception) {
-            Log.d("AppRepository", "syncPosts: Fallback a local")
-        }
-    }
-
-    suspend fun createPost(
-        tipo: String,
-        especie: String,
-        tamano: String,
-        nombreMascota: String,
-        descripcion: String,
-        rasgos: String,
-        distrito: String,
-        zona: String,
-        telefonoContacto: String,
-        telefonoVisible: Boolean,
-        fotosJson: String,
-        ubicacionLat: Double,
-        ubicacionLng: Double
-    ): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        val postId = UUID.randomUUID().toString()
-        val post = PostEntity(
-            id = postId,
-            userId = user.id,
-            userNombreCompleto = user.nombre,
-            userFotoPerfil = user.fotoPerfil,
-            tipo = tipo,
-            especie = especie,
-            tamano = tamano,
-            nombreMascota = nombreMascota,
-            descripcion = descripcion,
-            rasgos = rasgos,
-            estado = "activo",
-            fotosJson = fotosJson,
-            ubicacionLat = ubicacionLat,
-            ubicacionLng = ubicacionLng,
-            distrito = distrito,
-            zona = zona,
-            telefonoContacto = telefonoContacto,
-            telefonoVisible = telefonoVisible,
-            likesCount = 0,
-            created = System.currentTimeMillis()
-        )
-
-        try {
-            appDao.insertPost(post)
-        } catch (_: Exception) {}
-        _posts.value = listOf(post) + _posts.value.filter { it.id != postId }
-
-        return try {
-            val photosList = if (fotosJson.isNotBlank()) fotosJson.split(",") else emptyList<String>()
-            val body = mapOf(
-                "id" to postId,
-                "user_id" to user.id,
-                "tipo" to tipo,
-                "especie" to especie,
-                "tamano" to tamano,
-                "nombre_mascota" to nombreMascota,
-                "descripcion" to descripcion,
-                "rasgos" to rasgos,
-                "estado" to "activo",
-                "fotos" to photosList,
-                "ubicacion_lat" to ubicacionLat,
-                "ubicacion_lng" to ubicacionLng,
-                "distrito" to distrito,
-                "zona" to zona,
-                "telefono_contacto" to telefonoContacto,
-                "telefono_visible" to telefonoVisible,
-                "likes_count" to 0
-            )
-            ApiClient.getService().createPost(body)
-            syncPosts()
-            Result.success(true)
-        } catch (e: Exception) {
-            Result.success(true)
-        }
-    }
-
-    suspend fun updatePost(
-        postId: String,
-        tipo: String,
-        especie: String,
-        tamano: String,
-        nombreMascota: String,
-        descripcion: String,
-        rasgos: String,
-        distrito: String,
-        zona: String,
-        telefonoContacto: String,
-        telefonoVisible: Boolean,
-        fotosJson: String,
-        estado: String
-    ): Result<Boolean> {
-        val existing = _posts.value.find { it.id == postId } ?: return Result.failure(Exception("No encontrado"))
-        val updated = existing.copy(
-            tipo = tipo,
-            especie = especie,
-            tamano = tamano,
-            nombreMascota = nombreMascota,
-            descripcion = descripcion,
-            rasgos = rasgos,
-            distrito = distrito,
-            zona = zona,
-            telefonoContacto = telefonoContacto,
-            telefonoVisible = telefonoVisible,
-            fotosJson = fotosJson,
-            estado = estado
-        )
-        try {
-            appDao.insertPost(updated)
-        } catch (_: Exception) {}
-        _posts.value = _posts.value.map { if (it.id == postId) updated else it }
-
-        return try {
-            val photosList = if (fotosJson.isNotBlank()) fotosJson.split(",") else emptyList<String>()
-            val body = mapOf(
-                "tipo" to tipo,
-                "especie" to especie,
-                "tamano" to tamano,
-                "nombre_mascota" to nombreMascota,
-                "descripcion" to descripcion,
-                "rasgos" to rasgos,
-                "distrito" to distrito,
-                "zona" to zona,
-                "telefono_contacto" to telefonoContacto,
-                "telefono_visible" to telefonoVisible,
-                "fotos" to photosList,
-                "estado" to estado
-            )
-            ApiClient.getService().updatePost("eq.$postId", body)
-            Result.success(true)
-        } catch (e: Exception) {
-            Result.success(true)
-        }
-    }
-
-    suspend fun deletePost(postId: String): Result<Boolean> {
-        try {
-            appDao.deletePostById(postId)
-        } catch (_: Exception) {}
-        _posts.value = _posts.value.filter { it.id != postId }
-        return try {
-            ApiClient.getService().deletePost("eq.$postId")
-            Result.success(true)
-        } catch (e: Exception) {
-            Result.success(true)
-        }
-    }
-
-    suspend fun toggleLikePost(postId: String): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        val existing = _posts.value.find { it.id == postId } ?: return Result.failure(Exception("No encontrado"))
-        val updated = existing.copy(likesCount = existing.likesCount + 1)
-        _posts.value = _posts.value.map { if (it.id == postId) updated else it }
-        return Result.success(true)
-    }
-
-    suspend fun getCommentsForPost(postId: String): List<CommentEntity> {
-        return try {
-            val local = try { appDao.getCommentsForPostFlow(postId).firstOrNull() ?: emptyList() } catch (_: Exception) { emptyList() }
-            val response = ApiClient.getService().getComments("eq.$postId")
-            if (response.isSuccessful && response.body() != null) {
-                response.body()!!.map { it.toEntity() }
+                    val appDao = AppDatabase.getDatabase(context).appDao()
+                    postEntities.forEach { appDao.insertPost(it) }
+                    Log.d("AppRepository", "syncPosts: Sincronización local en Room realizada con éxito")
+                } catch (dbEx: Exception) {
+                    Log.e("AppRepository", "syncPosts: Error al sincronizar con Room", dbEx)
+                }
             } else {
-                local
+                val errorMsg = response.errorBody()?.string() ?: "Error de red al obtener publicaciones"
+                Log.e("CRITICAL_SUPABASE_ERROR", "syncPosts: Error al obtener publicaciones de red: $errorMsg")
+                // Limpiamos las publicaciones para que no queden datos viejos en la UI
+                _posts.value = emptyList()
             }
         } catch (e: Exception) {
-            emptyList()
+            Log.e("CRITICAL_SUPABASE_ERROR", "syncPosts: Excepción en la red al obtener publicaciones: ${e.message}", e)
+            // Limpiamos las publicaciones para que no queden datos viejos en la UI
+            _posts.value = emptyList()
         }
-    }
-
-    suspend fun addComment(postId: String, texto: String): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        val commentId = UUID.randomUUID().toString()
-        val comment = CommentEntity(
-            id = commentId,
-            postId = postId,
-            userId = user.id,
-            texto = texto,
-            userNombreCompleto = user.nombre,
-            userFotoPerfil = user.fotoPerfil,
-            userIsOng = user.rol == "ong",
-            created = System.currentTimeMillis()
-        )
-        try {
-            appDao.insertComment(comment)
-        } catch (_: Exception) {}
-
-        return try {
-            val body = mapOf(
-                "id" to commentId,
-                "post_id" to postId,
-                "user_id" to user.id,
-                "texto" to texto
-            )
-            ApiClient.getService().createComment(body)
-            Result.success(true)
-        } catch (e: Exception) {
-            Result.success(true)
-        }
-    }
-
-    suspend fun deleteComment(commentId: String): Result<Boolean> {
-        try {
-            appDao.deleteCommentById(commentId)
-        } catch (_: Exception) {}
-        return try {
-            ApiClient.getService().deleteComment("eq.$commentId")
-            Result.success(true)
-        } catch (e: Exception) {
-            Result.success(true)
-        }
-    }
-
-    suspend fun reportPost(postId: String, razon: String): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        val report = ReportEntity(
-            id = UUID.randomUUID().toString(),
-            postId = postId,
-            reporterUserId = user.id,
-            razon = razon,
-            estado = "pendiente"
-        )
-        try {
-            appDao.insertReport(report)
-        } catch (_: Exception) {}
-        _reports.value = listOf(report) + _reports.value
-        return Result.success(true)
-    }
-
-    suspend fun reportProfile(reportedUserId: String, razon: String): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        val report = ProfileReportEntity(
-            id = UUID.randomUUID().toString(),
-            reportedUserId = reportedUserId,
-            reporterUserId = user.id,
-            razon = razon,
-            estado = "pendiente"
-        )
-        try {
-            appDao.insertProfileReport(report)
-        } catch (_: Exception) {}
-        _profileReports.value = listOf(report) + _profileReports.value
-        return Result.success(true)
     }
 
     suspend fun syncVeterinarias() {
         try {
-            val local = try { appDao.getAllVeterinariasFlow().firstOrNull() ?: emptyList() } catch (_: Exception) { emptyList() }
-            if (local.isNotEmpty() && _veterinarias.value.isEmpty()) {
-                _veterinarias.value = local
-            }
             val response = PocketBaseClient.getService().getVeterinarias()
             if (response.isSuccessful && response.body() != null) {
-                val remote = response.body()!!.items.map { it.toEntity() }
-                _veterinarias.value = remote
-                try {
-                    remote.forEach { appDao.insertVeterinaria(it) }
-                } catch (_: Exception) {}
+                _veterinarias.value = response.body()!!.items.map { it.toEntity() }
+                Log.d("AppRepository", "syncVeterinarias: Sincronizadas ${_veterinarias.value.size} veterinarias")
+            } else {
+                Log.e("AppRepository", "syncVeterinarias: Error: ${response.errorBody()?.string()}")
             }
         } catch (e: Exception) {
-            Log.d("AppRepository", "syncVeterinarias: Fallback a local")
+            Log.e("AppRepository", "syncVeterinarias: Excepción en la red", e)
         }
-    }
-
-    suspend fun saveVeterinaria(
-        id: String?,
-        nombre: String,
-        direccion: String,
-        telefono: String,
-        staff: String,
-        horarios: String,
-        distrito: String,
-        clasificacion: String,
-        ubicacionLat: Double,
-        ubicacionLng: Double
-    ): Result<Boolean> {
-        val vetId = id ?: UUID.randomUUID().toString()
-        val vet = VeterinariaEntity(
-            id = vetId,
-            nombre = nombre,
-            direccion = direccion,
-            telefono = telefono,
-            staff = staff,
-            horarios = horarios,
-            distrito = distrito,
-            clasificacion = clasificacion,
-            ubicacionLat = ubicacionLat,
-            ubicacionLng = ubicacionLng,
-            activa = true
-        )
-        try {
-            appDao.insertVeterinaria(vet)
-        } catch (_: Exception) {}
-        _veterinarias.value = listOf(vet) + _veterinarias.value.filter { it.id != vetId }
-        return Result.success(true)
-    }
-
-    suspend fun deleteVeterinaria(vetId: String): Result<Boolean> {
-        _veterinarias.value = _veterinarias.value.filter { it.id != vetId }
-        return Result.success(true)
     }
 
     suspend fun syncCampaigns() {
         try {
-            val local = try { appDao.getAllCampaignsFlow().firstOrNull() ?: emptyList() } catch (_: Exception) { emptyList() }
-            if (local.isNotEmpty() && _campaigns.value.isEmpty()) {
-                _campaigns.value = local
-            }
             val response = PocketBaseClient.getService().getCampaigns()
             if (response.isSuccessful && response.body() != null) {
-                val remote = response.body()!!.items.map { it.toEntity() }
-                _campaigns.value = remote
-                try {
-                    remote.forEach { appDao.insertCampaign(it) }
-                } catch (_: Exception) {}
+                _campaigns.value = response.body()!!.items.map { it.toEntity() }
+                Log.d("AppRepository", "syncCampaigns: Sincronizadas ${_campaigns.value.size} campañas")
+            } else {
+                Log.e("AppRepository", "syncCampaigns: Error: ${response.errorBody()?.string()}")
             }
         } catch (e: Exception) {
-            Log.d("AppRepository", "syncCampaigns: Fallback a local")
+            Log.e("AppRepository", "syncCampaigns: Excepción en la red", e)
         }
-    }
-
-    suspend fun saveCampaign(
-        id: String?,
-        titulo: String,
-        descripcion: String,
-        imagenPortada: String,
-        contenidoDetallado: String,
-        fechaInicio: String,
-        fechaFin: String
-    ): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        val cId = id ?: UUID.randomUUID().toString()
-        val camp = CampaignEntity(
-            id = cId,
-            titulo = titulo,
-            descripcion = descripcion,
-            imagenPortada = imagenPortada,
-            contenidoDetallado = contenidoDetallado,
-            fechaInicio = fechaInicio,
-            fechaFin = fechaFin,
-            ongId = user.id,
-            ongNombre = user.nombre,
-            estado = "activa"
-        )
-        try {
-            appDao.insertCampaign(camp)
-        } catch (_: Exception) {}
-        _campaigns.value = listOf(camp) + _campaigns.value.filter { it.id != cId }
-        return Result.success(true)
-    }
-
-    suspend fun deleteCampaign(campaignId: String): Result<Boolean> {
-        _campaigns.value = _campaigns.value.filter { it.id != campaignId }
-        return Result.success(true)
-    }
-
-    suspend fun toggleLikeCampaign(campaignId: String): Result<Boolean> {
-        val existing = _campaigns.value.find { it.id == campaignId } ?: return Result.failure(Exception("No encontrado"))
-        val updated = existing.copy(likesCount = existing.likesCount + 1)
-        _campaigns.value = _campaigns.value.map { if (it.id == campaignId) updated else it }
-        return Result.success(true)
     }
 
     suspend fun syncNews() {
         try {
-            val local = try { appDao.getAllNewsFlow().firstOrNull() ?: emptyList() } catch (_: Exception) { emptyList() }
-            if (local.isNotEmpty() && _news.value.isEmpty()) {
-                _news.value = local
-            }
             val response = PocketBaseClient.getService().getNews()
             if (response.isSuccessful && response.body() != null) {
-                val remote = response.body()!!.items.map { it.toEntity() }
-                _news.value = remote
-                try {
-                    remote.forEach { appDao.insertNews(it) }
-                } catch (_: Exception) {}
+                _news.value = response.body()!!.items.map { it.toEntity() }
+                Log.d("AppRepository", "syncNews: Sincronizadas ${_news.value.size} noticias")
+            } else {
+                Log.e("AppRepository", "syncNews: Error: ${response.errorBody()?.string()}")
             }
         } catch (e: Exception) {
-            Log.d("AppRepository", "syncNews: Fallback a local")
+            Log.e("AppRepository", "syncNews: Excepción en la red", e)
         }
-    }
-
-    suspend fun saveNews(
-        id: String?,
-        titular: String,
-        contenido: String,
-        imagenPortada: String,
-        imagenNoticia: String
-    ): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        val nId = id ?: UUID.randomUUID().toString()
-        val newsItem = NewsEntity(
-            id = nId,
-            titular = titular,
-            contenido = contenido,
-            autorId = user.id,
-            autorNombre = user.nombre,
-            imagenPortada = imagenPortada,
-            imagenNoticia = imagenNoticia,
-            created = System.currentTimeMillis()
-        )
-        try {
-            appDao.insertNews(newsItem)
-        } catch (_: Exception) {}
-        _news.value = listOf(newsItem) + _news.value.filter { it.id != nId }
-        return Result.success(true)
-    }
-
-    suspend fun deleteNews(newsId: String): Result<Boolean> {
-        _news.value = _news.value.filter { it.id != newsId }
-        return Result.success(true)
     }
 
     suspend fun syncStatuses() {
         try {
-            val localStatuses = try { appDao.getAllStatusesFlow().firstOrNull() ?: emptyList() } catch (_: Exception) { emptyList() }
-            if (localStatuses.isNotEmpty() && _statuses.value.isEmpty()) {
-                _statuses.value = localStatuses
+            // Cargar primero datos locales si la lista está vacía
+            try {
+                val localStatuses = appDao.getStatusesForUserFlow(_currentUser.value?.id ?: "").firstOrNull() ?: emptyList()
+                if (localStatuses.isNotEmpty() && _statuses.value.isEmpty()) {
+                    _statuses.value = localStatuses
+                }
+            } catch (dbEx: Exception) {
+                Log.e("AppRepository", "syncStatuses: Error al leer Room local", dbEx)
             }
-        } catch (_: Exception) {}
+
+            val response = PocketBaseClient.getService().getUserStatuses()
+            if (response.isSuccessful && response.body() != null) {
+                val remoteStatuses = response.body()!!.items.map { pbStatus ->
+                    val matchedUser = _posts.value.find { it.userId == pbStatus.userId }
+                    val nombre = matchedUser?.userNombreCompleto ?: if (pbStatus.userId == _currentUser.value?.id) _currentUser.value?.nombre ?: "Vecino Colaborador" else "Vecino Colaborador"
+                    val foto = matchedUser?.userFotoPerfil ?: if (pbStatus.userId == _currentUser.value?.id) _currentUser.value?.fotoPerfil ?: "avatar_placeholder" else "avatar_placeholder"
+                    UserStatusEntity(
+                        id = pbStatus.id,
+                        userId = pbStatus.userId,
+                        userNombreCompleto = nombre,
+                        userFotoPerfil = foto,
+                        texto = pbStatus.texto,
+                        likesCount = pbStatus.likesCount ?: 0,
+                        created = parsePbDate(pbStatus.created)
+                    )
+                }
+
+                // Guardar en Room local
+                try {
+                    remoteStatuses.forEach { appDao.insertStatus(it) }
+                } catch (dbEx: Exception) {
+                    Log.e("AppRepository", "syncStatuses: Error al guardar en Room", dbEx)
+                }
+
+                // Preservar estados recientes que tal vez aún no bajaron de la red
+                val remoteIds = remoteStatuses.map { it.id }.toSet()
+                val localOnly = _statuses.value.filter { it.id !in remoteIds }
+                _statuses.value = localOnly + remoteStatuses
+                Log.d("AppRepository", "syncStatuses: Sincronizados ${_statuses.value.size} estados")
+            } else {
+                Log.e("AppRepository", "syncStatuses: Error: ${response.errorBody()?.string()}")
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "syncStatuses: Excepción en la red", e)
+        }
     }
 
     suspend fun postStatus(texto: String): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        val statusId = UUID.randomUUID().toString()
-        val status = UserStatusEntity(
+        val user = _currentUser.value ?: return Result.failure(Exception("No hay usuario autenticado"))
+        
+        var token = PocketBaseClient.token
+        if (token.isNullOrBlank()) {
+            ApiClient.init(context)
+            token = PocketBaseClient.token
+        }
+        
+        val statusId = "ust_" + java.util.UUID.randomUUID().toString().take(8)
+        val now = System.currentTimeMillis()
+        val newStatus = UserStatusEntity(
             id = statusId,
             userId = user.id,
             userNombreCompleto = user.nombre,
-            userFotoPerfil = user.fotoPerfil,
+            userFotoPerfil = if (user.fotoPerfil.isNotBlank()) user.fotoPerfil else "avatar_placeholder",
             texto = texto,
             likesCount = 0,
-            created = System.currentTimeMillis()
+            created = now
         )
+
+        // 1. Guardar localmente en Room y actualizar Flow inmediatamente para reactividad instantánea
         try {
-            appDao.insertStatus(status)
-        } catch (_: Exception) {}
-        _statuses.value = listOf(status) + _statuses.value.filter { it.id != statusId }
-        return Result.success(true)
+            appDao.insertStatus(newStatus)
+        } catch (dbEx: Exception) {
+            Log.e("AppRepository", "postStatus: Error al insertar en Room", dbEx)
+        }
+        _statuses.value = listOf(newStatus) + _statuses.value.filter { it.id != statusId }
+
+        // 2. Enviar a la base de datos remota
+        return try {
+            val body = mapOf(
+                "id" to statusId,
+                "user_id" to user.id,
+                "texto" to texto
+            )
+            
+            val response = if (!token.isNullOrBlank()) {
+                PocketBaseClient.getService().createUserStatus("Bearer $token", body)
+            } else {
+                ApiClient.getService().createUserStatus(body)
+            }
+
+            if (response.isSuccessful) {
+                Log.d("AppRepository", "postStatus: Estado publicado exitosamente en Supabase")
+            } else {
+                Log.w("AppRepository", "postStatus: Respuesta de red código ${response.code()}")
+            }
+
+            syncStatuses()
+            Result.success(true)
+        } catch (e: Exception) {
+            Log.e("AppRepository", "postStatus: Excepción de red, mantenido en local", e)
+            Result.success(true)
+        }
     }
 
-    suspend fun deleteStatus(statusId: String): Result<Boolean> {
-        try {
-            appDao.deleteStatusById(statusId)
-        } catch (_: Exception) {}
-        _statuses.value = _statuses.value.filter { it.id != statusId }
-        return Result.success(true)
+    suspend fun getCommentsForPost(postId: String): List<CommentEntity> {
+        return try {
+            val response = PocketBaseClient.getService().getComments(filter = "post_id='$postId'")
+            if (response.isSuccessful && response.body() != null) {
+                response.body()!!.items.map { it.toEntity() }
+            } else {
+                Log.e("AppRepository", "getCommentsForPost: Error: ${response.errorBody()?.string()}")
+                emptyList()
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "getCommentsForPost: Excepción en la red", e)
+            emptyList()
+        }
     }
 
-    suspend fun toggleLikeStatus(statusId: String): Result<Boolean> {
-        val existing = _statuses.value.find { it.id == statusId } ?: return Result.failure(Exception("No encontrado"))
-        val updated = existing.copy(likesCount = existing.likesCount + 1)
-        _statuses.value = _statuses.value.map { if (it.id == statusId) updated else it }
-        return Result.success(true)
-    }
+    fun getAllColaboradoresFlow(): Flow<List<ColaboradorEntity>> = colaboradores
 
     suspend fun syncColaboradores() {
         try {
-            val local = try { appDao.getAllColaboradoresFlow().firstOrNull() ?: emptyList() } catch (_: Exception) { emptyList() }
-            if (local.isNotEmpty() && _colaboradores.value.isEmpty()) {
-                _colaboradores.value = local
-            }
             val response = PocketBaseClient.getService().getColaboradores()
             if (response.isSuccessful && response.body() != null) {
-                val remote = response.body()!!.items.map { it.toEntity() }
-                _colaboradores.value = remote
-                try {
-                    remote.forEach { appDao.insertColaborador(it) }
-                } catch (_: Exception) {}
+                _colaboradores.value = response.body()!!.items.map { it.toEntity() }
+                Log.d("AppRepository", "syncColaboradores: Sincronizados ${_colaboradores.value.size} colaboradores")
+            } else {
+                Log.e("AppRepository", "syncColaboradores: Error: ${response.errorBody()?.string()}")
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e("AppRepository", "syncColaboradores: Excepción en la red", e)
+        }
     }
 
     suspend fun saveColaborador(
@@ -745,161 +602,424 @@ class AppRepository(
         whatsapp: String,
         instagram: String,
         direccion: String
-    ): Result<Boolean> {
-        val cId = id ?: UUID.randomUUID().toString()
-        val colab = ColaboradorEntity(
-            id = cId,
-            nombre = nombre,
-            descripcion = descripcion,
-            logo = logo,
-            enlace = enlace,
-            telefono = telefono,
-            whatsapp = whatsapp,
-            instagram = instagram,
-            direccion = direccion
-        )
-        try {
-            appDao.insertColaborador(colab)
-        } catch (_: Exception) {}
-        _colaboradores.value = listOf(colab) + _colaboradores.value.filter { it.id != cId }
-        return Result.success(true)
+    ): Boolean {
+        val token = PocketBaseClient.token ?: return false
+        return try {
+            val body: Map<String, Any> = mapOf(
+                "nombre" to nombre,
+                "descripcion" to descripcion,
+                "logo" to logo,
+                "enlace" to enlace,
+                "telefono" to telefono,
+                "whatsapp" to whatsapp,
+                "instagram" to instagram,
+                "direccion" to direccion
+            )
+            val service = PocketBaseClient.getService()
+            val response = if (id == null) {
+                service.createColaborador("Bearer $token", body)
+            } else {
+                service.updateColaborador("Bearer $token", id, body)
+            }
+            if (response.isSuccessful) {
+                Log.d("AppRepository", "saveColaborador: Guardado correctamente en Supabase")
+                syncColaboradores()
+                true
+            } else {
+                Log.e("AppRepository", "saveColaborador: Error: ${response.errorBody()?.string()}")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "saveColaborador: Excepción", e)
+            false
+        }
     }
 
-    suspend fun deleteColaborador(colabId: String): Result<Boolean> {
-        _colaboradores.value = _colaboradores.value.filter { it.id != colabId }
-        return Result.success(true)
+    suspend fun savePost(
+        id: String?,
+        tipo: String,
+        especie: String,
+        tamano: String,
+        nombre: String,
+        descripcion: String,
+        rasgos: String,
+        distrito: String,
+        zona: String,
+        fotos: String,
+        lat: Double,
+        lng: Double,
+        telefonoVisible: Boolean,
+        telefonoContacto: String
+    ): Result<Boolean> {
+        val user = _currentUser.value ?: return Result.failure(Exception("No hay sesión de usuario activa"))
+        
+        // Verificación estricta del token, con intento de reinicialización si es nulo o vacío
+        var token = PocketBaseClient.token
+        if (token.isNullOrBlank()) {
+            Log.w("AppRepository", "savePost: El token es nulo o vacío. Forzando reinicialización de ApiClient...")
+            ApiClient.init(context)
+            token = PocketBaseClient.token
+        }
+        
+        if (token.isNullOrBlank()) {
+            val errMsg = "Token de sesión nulo o vacío después de forzar reinicialización. Por favor re-inicie sesión."
+            Log.e("CRITICAL_SUPABASE_ERROR", "Error al guardar: $errMsg")
+            return Result.failure(Exception(errMsg))
+        }
+        
+        return try {
+            val fotosList = if (fotos.isNotEmpty()) fotos.split(",").filter { it.isNotEmpty() } else emptyList()
+            val finalId = id ?: ("post_" + java.util.UUID.randomUUID().toString().take(8))
+            val isNew = id == null || _posts.value.none { it.id == finalId }
+            val body: Map<String, Any> = mapOf(
+                "id" to finalId,
+                "user_id" to user.id,
+                "tipo" to tipo,
+                "especie" to especie,
+                "tamano" to tamano,
+                "nombre_mascota" to nombre,
+                "descripcion" to descripcion,
+                "rasgos" to rasgos,
+                "distrito" to distrito,
+                "zona" to zona,
+                "fotos" to fotosList,
+                "telefono_contacto" to telefonoContacto,
+                "telefono_visible" to telefonoVisible,
+                "estado" to "activo"
+            )
+            val service = PocketBaseClient.getService()
+            val response = if (isNew) {
+                service.createPostJson("Bearer $token", body)
+            } else {
+                service.updatePost("Bearer $token", finalId, body)
+            }
+            if (response.isSuccessful && response.body() != null) {
+                Log.d("AppRepository", "savePost: Publicación guardada exitosamente en Supabase")
+                val pbPost = response.body()!!
+                val postEntity = pbPost.toEntity()
+                
+                // Room local save dependending on confirmation from Supabase
+                try {
+                    val appDao = AppDatabase.getDatabase(context).appDao()
+                    appDao.insertPost(postEntity)
+                    Log.d("AppRepository", "savePost: Publicación guardada localmente en Room con éxito")
+                } catch (dbEx: Exception) {
+                    Log.e("AppRepository", "savePost: Error al guardar en base de datos Room", dbEx)
+                }
+
+                syncPosts()
+                Result.success(true)
+            } else {
+                val errorMsg = response.errorBody()?.string() ?: "Error de red al guardar la publicación"
+                Log.e("CRITICAL_SUPABASE_ERROR", "Error al guardar (Código ${response.code()}): $errorMsg")
+                Result.failure(Exception("Error en servidor Supabase (Código ${response.code()}): $errorMsg"))
+            }
+        } catch (e: Exception) {
+            Log.e("CRITICAL_SUPABASE_ERROR", "Error al guardar: " + e.message, e)
+            Result.failure(e)
+        }
     }
+
+    suspend fun deletePostLocally(postId: String) {
+        try {
+            val appDao = AppDatabase.getDatabase(context).appDao()
+            appDao.deletePostById(postId)
+        } catch (e: Exception) {
+            Log.e("AppRepository", "deletePostLocally: Error en Room", e)
+        }
+        _posts.value = _posts.value.filter { it.id != postId }
+    }
+
+    suspend fun updatePostEstadoLocally(postId: String, nuevoEstado: String) {
+        val currentList = _posts.value.toMutableList()
+        val index = currentList.indexOfFirst { it.id == postId }
+        if (index != -1) {
+            val updated = currentList[index].copy(estado = nuevoEstado)
+            try {
+                val appDao = AppDatabase.getDatabase(context).appDao()
+                appDao.insertPost(updated)
+            } catch (e: Exception) {
+                Log.e("AppRepository", "updatePostEstadoLocally: Error en Room", e)
+            }
+            currentList[index] = updated
+            _posts.value = currentList
+        }
+    }
+
+    suspend fun deleteColaborador(id: String): Boolean {
+        val token = PocketBaseClient.token ?: return false
+        return try {
+            val response = PocketBaseClient.getService().deleteColaborador("Bearer $token", id)
+            if (response.isSuccessful) {
+                Log.d("AppRepository", "deleteColaborador: Eliminado exitosamente de Supabase")
+                syncColaboradores()
+                true
+            } else {
+                Log.e("AppRepository", "deleteColaborador: Error: ${response.errorBody()?.string()}")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "deleteColaborador: Excepción", e)
+            false
+        }
+    }
+
+    fun getBlocksForUserFlow(userId: String): Flow<List<UserBlockEntity>> = blockedUsers
 
     suspend fun syncBlocks() {
         val user = _currentUser.value ?: return
         try {
-            val local = appDao.getBlockedUsersFlow(user.id).firstOrNull() ?: emptyList()
-            _blockedUsers.value = local
-        } catch (_: Exception) {}
+            val response = PocketBaseClient.getService().getBlocks(filter = "user_id='${user.id}'")
+            if (response.isSuccessful && response.body() != null) {
+                _blockedUsers.value = response.body()!!.items.map { it.toEntity() }
+                Log.d("AppRepository", "syncBlocks: Sincronizados ${_blockedUsers.value.size} bloqueos")
+            } else {
+                Log.e("AppRepository", "syncBlocks: Error: ${response.errorBody()?.string()}")
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "syncBlocks: Excepción", e)
+        }
     }
 
-    suspend fun blockUser(blockedUserId: String, nombre: String, foto: String): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        val block = UserBlockEntity(
-            id = "${user.id}_$blockedUserId",
-            userId = user.id,
-            blockedUserId = blockedUserId,
-            blockedUserNombre = nombre,
-            blockedUserFoto = foto
-        )
-        try {
-            appDao.insertBlock(block)
-        } catch (_: Exception) {}
-        _blockedUsers.value = listOf(block) + _blockedUsers.value
-        return Result.success(true)
+    suspend fun blockUser(blockedUserId: String, blockedNombre: String, blockedFoto: String): Boolean {
+        val user = _currentUser.value ?: return false
+        val token = PocketBaseClient.token ?: return false
+        
+        return try {
+            val response = PocketBaseClient.getService().createBlock(
+                token = "Bearer $token",
+                body = mapOf(
+                    "user_id" to user.id,
+                    "blocked_user_id" to blockedUserId,
+                    "blocked_user_nombre" to blockedNombre,
+                    "blocked_user_foto" to blockedFoto
+                )
+            )
+            if (response.isSuccessful) {
+                Log.d("AppRepository", "blockUser: Bloqueo exitoso guardado en Supabase")
+                syncBlocks()
+                true
+            } else {
+                Log.e("AppRepository", "blockUser: Error: ${response.errorBody()?.string()}")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "blockUser: Excepción", e)
+            false
+        }
     }
 
-    suspend fun unblockUser(blockedUserId: String): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        try {
-            appDao.deleteBlock(user.id, blockedUserId)
-        } catch (_: Exception) {}
-        _blockedUsers.value = _blockedUsers.value.filter { it.blockedUserId != blockedUserId }
-        return Result.success(true)
+    suspend fun unblockUser(blockedUserId: String): Boolean {
+        val user = _currentUser.value ?: return false
+        val token = PocketBaseClient.token ?: return false
+        
+        return try {
+            val service = PocketBaseClient.getService()
+            val response = service.getBlocks("user_id='${user.id}' && blocked_user_id='$blockedUserId'")
+            if (response.isSuccessful && response.body() != null && response.body()!!.items.isNotEmpty()) {
+                val pbId = response.body()!!.items[0].id
+                val deleteResponse = service.deleteBlock("Bearer $token", pbId)
+                if (deleteResponse.isSuccessful) {
+                    Log.d("AppRepository", "unblockUser: Desbloqueo exitoso en Supabase")
+                    syncBlocks()
+                    return true
+                }
+            }
+            false
+        } catch (e: Exception) {
+            Log.e("AppRepository", "unblockUser: Excepción", e)
+            false
+        }
     }
 
     suspend fun syncFollows() {
         val user = _currentUser.value ?: return
         try {
-            val local = appDao.getFollowsFlow(user.id).firstOrNull() ?: emptyList()
-            _follows.value = local
-        } catch (_: Exception) {}
+            val localFollows = try { appDao.getFollowsForUser(user.id) } catch (e: Exception) { emptyList() }
+            if (localFollows.isNotEmpty() && _follows.value.isEmpty()) {
+                _follows.value = localFollows
+            }
+
+            val response = PocketBaseClient.getService().getFollows(filter = "follower_id='${user.id}'")
+            if (response.isSuccessful && response.body() != null) {
+                val remoteFollows = response.body()!!.items.map { it.toEntity() }
+                _follows.value = remoteFollows
+                try {
+                    remoteFollows.forEach { appDao.insertFollow(it) }
+                } catch (dbEx: Exception) {
+                    Log.e("AppRepository", "syncFollows: Error guardando en Room", dbEx)
+                }
+                Log.d("AppRepository", "syncFollows: Sincronizados ${_follows.value.size} seguidos")
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "syncFollows: Excepción", e)
+        }
     }
 
-    suspend fun toggleFollow(followingId: String): Result<Boolean> {
-        val user = _currentUser.value ?: return Result.failure(Exception("No autenticado"))
-        val isFollowing = _follows.value.any { it.followingId == followingId }
-        if (isFollowing) {
-            try {
-                appDao.deleteFollow(user.id, followingId)
-            } catch (_: Exception) {}
-            _follows.value = _follows.value.filter { it.followingId != followingId }
-        } else {
-            val follow = UserFollowEntity(
-                id = "${user.id}_$followingId",
-                followerId = user.id,
-                followingId = followingId
-            )
-            try {
-                appDao.insertFollow(follow)
-            } catch (_: Exception) {}
-            _follows.value = listOf(follow) + _follows.value
+    suspend fun followUser(targetUserId: String): Boolean {
+        val user = _currentUser.value ?: return false
+        if (user.id == targetUserId) return false
+
+        val id = "${user.id}_${targetUserId}"
+        val newFollow = UserFollowEntity(id = id, followerId = user.id, followingId = targetUserId)
+
+        try {
+            appDao.insertFollow(newFollow)
+        } catch (dbEx: Exception) {
+            Log.e("AppRepository", "followUser: Error guardando en Room", dbEx)
         }
-        return Result.success(true)
+        _follows.value = _follows.value.filter { it.followingId != targetUserId } + newFollow
+
+        return try {
+            var token = PocketBaseClient.token
+            if (token.isNullOrBlank()) {
+                ApiClient.init(context)
+                token = PocketBaseClient.token
+            }
+            val response = PocketBaseClient.getService().createFollow(
+                token = if (!token.isNullOrBlank()) "Bearer $token" else "",
+                body = mapOf(
+                    "id" to id,
+                    "follower_id" to user.id,
+                    "following_id" to targetUserId
+                )
+            )
+            if (response.isSuccessful) {
+                Log.d("AppRepository", "followUser: Guardado en backend")
+            }
+            syncFollows()
+            true
+        } catch (e: Exception) {
+            Log.e("AppRepository", "followUser: Excepción de red", e)
+            true
+        }
+    }
+
+    suspend fun unfollowUser(targetUserId: String): Boolean {
+        val user = _currentUser.value ?: return false
+
+        try {
+            appDao.deleteFollow(user.id, targetUserId)
+        } catch (dbEx: Exception) {
+            Log.e("AppRepository", "unfollowUser: Error en Room", dbEx)
+        }
+        _follows.value = _follows.value.filter { it.followingId != targetUserId }
+
+        return try {
+            var token = PocketBaseClient.token
+            if (token.isNullOrBlank()) {
+                ApiClient.init(context)
+                token = PocketBaseClient.token
+            }
+            val id = "${user.id}_${targetUserId}"
+            PocketBaseClient.getService().deleteFollow(
+                token = if (!token.isNullOrBlank()) "Bearer $token" else "",
+                id = id
+            )
+            syncFollows()
+            true
+        } catch (e: Exception) {
+            Log.e("AppRepository", "unfollowUser: Excepción de red", e)
+            true
+        }
+    }
+
+    suspend fun logAdminAction(accion: String, targetId: String, detalles: String) {
+        val user = _currentUser.value ?: return
+        val token = PocketBaseClient.token ?: return
+        try {
+            val response = PocketBaseClient.getService().createAdminAction(
+                token = "Bearer $token",
+                body = mapOf(
+                    "user_id" to user.id,
+                    "accion" to accion,
+                    "target_id" to targetId,
+                    "detalles" to detalles
+                )
+            )
+            if (response.isSuccessful) {
+                Log.d("AppRepository", "logAdminAction: Acción de administración registrada en Supabase")
+            } else {
+                Log.e("AppRepository", "logAdminAction: Error: ${response.errorBody()?.string()}")
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "logAdminAction: Excepción", e)
+        }
     }
 
     suspend fun syncReports() {
         try {
-            val local = try { appDao.getAllReportsFlow().firstOrNull() ?: emptyList() } catch (_: Exception) { emptyList() }
-            _reports.value = local
-        } catch (_: Exception) {}
+            val response = ApiClient.getService().getReports()
+            if (response.isSuccessful && response.body() != null) {
+                _reports.value = response.body()!!.map { pbReport ->
+                    ReportEntity(
+                        id = pbReport.id,
+                        postId = pbReport.postId,
+                        reporterUserId = pbReport.reporterUserId,
+                        razon = pbReport.razon,
+                        estado = pbReport.estado ?: "pendiente"
+                    )
+                }
+                Log.d("AppRepository", "syncReports: Sincronizados ${_reports.value.size} reportes de publicaciones")
+            } else {
+                Log.e("AppRepository", "syncReports: Error: ${response.errorBody()?.string()}")
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "syncReports: Excepción", e)
+        }
     }
 
     suspend fun syncProfileReports() {
         try {
-            val local = try { appDao.getAllProfileReportsFlow().firstOrNull() ?: emptyList() } catch (_: Exception) { emptyList() }
-            _profileReports.value = local
-        } catch (_: Exception) {}
+            val response = ApiClient.getService().getProfileReports()
+            if (response.isSuccessful && response.body() != null) {
+                _profileReports.value = response.body()!!.map { pbProfileReport ->
+                    ProfileReportEntity(
+                        id = pbProfileReport.id,
+                        reportedUserId = pbProfileReport.reportedUserId,
+                        reporterUserId = pbProfileReport.reporterUserId,
+                        razon = pbProfileReport.razon,
+                        estado = pbProfileReport.estado ?: "pendiente"
+                    )
+                }
+                Log.d("AppRepository", "syncProfileReports: Sincronizados ${_profileReports.value.size} reportes de perfiles")
+            } else {
+                Log.e("AppRepository", "syncProfileReports: Error: ${response.errorBody()?.string()}")
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "syncProfileReports: Excepción", e)
+        }
     }
 
     suspend fun syncNotifications() {
         val user = _currentUser.value ?: return
         try {
-            val local = try { appDao.getNotificationsForUserFlow(user.id).firstOrNull() ?: emptyList() } catch (_: Exception) { emptyList() }
-            _notifications.value = local
-        } catch (_: Exception) {}
+            val response = ApiClient.getService().getNotifications(userIdQuery = "eq.${user.id}")
+            if (response.isSuccessful && response.body() != null) {
+                _notifications.value = response.body()!!.map { pbNotif ->
+                    NotificationEntity(
+                        id = pbNotif.id,
+                        userId = pbNotif.userId,
+                        tipo = "comentario",
+                        postId = "",
+                        commentId = "",
+                        fromUserId = "",
+                        fromUserNombre = "",
+                        mensaje = pbNotif.mensaje,
+                        leida = pbNotif.leida ?: false
+                    )
+                }
+                Log.d("AppRepository", "syncNotifications: Sincronizadas ${_notifications.value.size} notificaciones")
+            } else {
+                Log.e("AppRepository", "syncNotifications: Error: ${response.errorBody()?.string()}")
+            }
+        } catch (e: Exception) {
+            Log.e("AppRepository", "syncNotifications: Excepción", e)
+        }
     }
 
     suspend fun seedMockData() {
-        try {
-            val currentVets = appDao.getAllVeterinariasFlow().firstOrNull() ?: emptyList()
-            if (currentVets.isEmpty()) {
-                val defaultVets = listOf(
-                    VeterinariaEntity("vet_1", "Veterinaria San Rafael", "Av. Mitre 540, San Rafael", "2604421122", "Dr. Pérez, Dra. Gómez", "Lun a Sáb 8:30 a 12:30 y 16:30 a 20:30", "San Rafael", "Horario Comercio", -34.6177, -68.3301, "", true),
-                    VeterinariaEntity("vet_2", "Clínica Veterinaria 24hs Alvear", "Av. Alvear Oeste 320, General Alvear", "2625423344", "Dr. Fernández, Dra. Martínez", "Atención continuada 24hs", "General Alvear", "Guardia 24hs", -34.9754, -67.6908, "", true),
-                    VeterinariaEntity("vet_3", "Veterinaria Malargüe Animal", "San Martín 890, Malargüe", "2604470011", "Dr. Silva", "Lun a Vie 9:00 a 13:00 y 17:00 a 21:00", "Malargüe", "Horario Comercio", -35.4756, -69.5842, "", true),
-                    VeterinariaEntity("vet_4", "Hospital Veterinario Central", "Hipólito Yrigoyen 1420, San Rafael", "2604556677", "Dra. Ramos, Dr. Morales", "Guardia de emergencias 24hs", "San Rafael", "Guardia 24hs", -34.6110, -68.3450, "", true)
-                )
-                defaultVets.forEach { appDao.insertVeterinaria(it) }
-                _veterinarias.value = defaultVets
-            }
-
-            val currentCampaigns = appDao.getAllCampaignsFlow().firstOrNull() ?: emptyList()
-            if (currentCampaigns.isEmpty()) {
-                val defaultCampaigns = listOf(
-                    CampaignEntity("camp_1", "Campaña de Castración Gratuita", "Jornada comunitaria de esterilización canina y felina en San Rafael y Alvear.", "", "Organizado por voluntarios y áreas de zoonosis. Asistir con turno previo y animal en ayuno.", "2026-08-01", "2026-08-31", "ong_1", "Refugio Patitas Mendocinas", "activa", 42),
-                    CampaignEntity("camp_2", "Vacunación Antirrábica Móvil", "Puestos móviles de vacunación antirrábica gratuita en plazas principales del sur mendocino.", "", "Protegé a tu mascota contra la rabia. Aplicación gratuita para perros y gatos a partir de los 3 meses.", "2026-08-10", "2026-09-15", "ong_2", "Asociación Protectora del Sur", "activa", 29)
-                )
-                defaultCampaigns.forEach { appDao.insertCampaign(it) }
-                _campaigns.value = defaultCampaigns
-            }
-
-            val currentNews = appDao.getAllNewsFlow().firstOrNull() ?: emptyList()
-            if (currentNews.isEmpty()) {
-                val defaultNews = listOf(
-                    NewsEntity("news_1", "Consejos para cuidar a tus mascotas durante las bajas temperaturas", "Con el frío cordillerano, es fundamental brindar abrigo adecuado, agua fresca no congelada y alimento calórico a los animales.", "admin_1", "InfoAnimal Redacción", "", "", System.currentTimeMillis() - 86400000L * 2),
-                    NewsEntity("news_2", "Nueva ordenanza de tenencia responsable y registro de mascotas", "Se implementa un censo voluntario con código QR y microchip para facilitar el reencuentro de animales perdidos.", "admin_1", "InfoAnimal Redacción", "", "", System.currentTimeMillis() - 86400000L * 5)
-                )
-                defaultNews.forEach { appDao.insertNews(it) }
-                _news.value = defaultNews
-            }
-
-            val currentColabs = appDao.getAllColaboradoresFlow().firstOrNull() ?: emptyList()
-            if (currentColabs.isEmpty()) {
-                val defaultColabs = listOf(
-                    ColaboradorEntity("colab_1", "Refugio Huellitas del Sur", "Asociación sin fines de lucro dedicada al rescate, tránsito y adopción responsable en Mendoza.", "", "https://instagram.com/huellitasdelsur", "2604112233", "2604112233", "@huellitasdelsur", "San Rafael, Mendoza"),
-                    ColaboradorEntity("colab_2", "Amigos de los Animales Alvear", "Grupo de voluntarios comprometidos con el rescate de animales y castraciones.", "", "https://instagram.com/amigosalvear", "2625445566", "2625445566", "@amigosalvear", "General Alvear, Mendoza")
-                )
-                defaultColabs.forEach { appDao.insertColaborador(it) }
-                _colaboradores.value = defaultColabs
-            }
-        } catch (e: Exception) {
-            Log.d("AppRepository", "seedMockData: Error", e)
-        }
+        // En un esquema 100% online y sin base de datos local Room, ya no sembramos datos de mock localmente.
+        // Los datos se administran directamente en el backend de Supabase.
     }
 }

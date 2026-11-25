@@ -1,320 +1,224 @@
 package com.example.data.network
 
-import com.example.data.model.*
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
+import com.example.data.model.*
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 
-fun parsePbDate(dateStr: String?): Long {
-    if (dateStr.isNullOrBlank()) return System.currentTimeMillis()
-    val formats = listOf(
-        "yyyy-MM-dd'T'HH:mm:ss.SSSSSSX",
-        "yyyy-MM-dd'T'HH:mm:ss.SSSX",
-        "yyyy-MM-dd'T'HH:mm:ssX",
-        "yyyy-MM-dd HH:mm:ss.SSS'Z'",
-        "yyyy-MM-dd HH:mm:ss.SSS",
-        "yyyy-MM-dd HH:mm:ss"
-    )
-    for (pattern in formats) {
-        try {
-            val sdf = SimpleDateFormat(pattern, Locale.US).apply {
-                timeZone = TimeZone.getTimeZone("UTC")
-            }
-            return sdf.parse(dateStr)?.time ?: System.currentTimeMillis()
-        } catch (_: Exception) {}
-    }
-    return System.currentTimeMillis()
-}
-
 @JsonClass(generateAdapter = true)
 data class PocketBaseListResponse<T>(
-    val page: Int = 1,
-    val perPage: Int = 100,
-    val totalItems: Int = 0,
-    val totalPages: Int = 1,
-    val items: List<T> = emptyList()
+    @Json(name = "page") val page: Int,
+    @Json(name = "perPage") val perPage: Int,
+    @Json(name = "totalItems") val totalItems: Int,
+    @Json(name = "totalPages") val totalPages: Int,
+    @Json(name = "items") val items: List<T>
 )
 
 @JsonClass(generateAdapter = true)
 data class PocketBaseUser(
-    val id: String,
-    val email: String? = "",
-    val nombre: String? = "",
-    val telefono: String? = "",
-    @Json(name = "zona_principal") val zonaPrincipal: String? = "San Rafael",
-    val rol: String? = "user",
-    val bloqueado: Boolean? = false,
-    @Json(name = "foto_perfil") val rawFotoPerfil: String? = "",
-    @Json(name = "avatar_url") val rawAvatarUrl: String? = "",
+    @Json(name = "id") val id: String,
+    @Json(name = "email") val email: String,
+    @Json(name = "nombre") val nombre: String,
+    @Json(name = "telefono") val telefono: String? = "",
+    @Json(name = "zona_principal") val zonaPrincipal: String? = "",
+    @Json(name = "rol") val rol: String? = "user",
+    @Json(name = "bloqueado") val bloqueado: Boolean? = false,
+    @Json(name = "foto_perfil") val fotoPerfil: String? = "",
     @Json(name = "foto_portada") val fotoPortada: String? = "",
-    val biografia: String? = ""
-) {
-    val fotoPerfil: String
-        get() = when {
-            !rawFotoPerfil.isNullOrBlank() -> rawFotoPerfil
-            !rawAvatarUrl.isNullOrBlank() -> rawAvatarUrl
-            else -> ""
-        }
-}
-
-fun PocketBaseUser.toEntity() = UserEntity(
-    id = id,
-    email = email ?: "",
-    nombre = nombre ?: "",
-    telefono = telefono ?: "",
-    zonaPrincipal = zonaPrincipal ?: "San Rafael",
-    rol = rol ?: "user",
-    bloqueado = bloqueado ?: false,
-    fotoPerfil = fotoPerfil,
-    fotoPortada = fotoPortada ?: "",
-    biografia = biografia ?: ""
+    @Json(name = "biografia") val biografia: String? = "",
+    @Json(name = "created") val created: String? = ""
 )
 
-fun SupabaseUser.toEntity() = UserEntity(
-    id = id,
-    email = email ?: "",
-    nombre = nombre ?: "",
-    telefono = telefono ?: "",
-    zonaPrincipal = zonaPrincipal ?: "San Rafael",
-    rol = rol ?: "user",
-    bloqueado = false,
-    fotoPerfil = fotoPerfil,
-    fotoPortada = fotoPortada ?: "",
-    biografia = biografia ?: ""
-)
-
-fun SupabaseUserContainer.toEntity() = UserEntity(
-    id = id,
-    email = email ?: "",
-    nombre = (userMetadata?.get("nombre") as? String) ?: "",
-    telefono = (userMetadata?.get("telefono") as? String) ?: "",
-    zonaPrincipal = (userMetadata?.get("zona_principal") as? String) ?: "San Rafael",
-    rol = (userMetadata?.get("rol") as? String) ?: "user",
-    bloqueado = false,
-    fotoPerfil = (userMetadata?.get("foto_perfil") as? String) ?: "",
-    fotoPortada = (userMetadata?.get("foto_portada") as? String) ?: "",
-    biografia = (userMetadata?.get("biografia") as? String) ?: ""
+@JsonClass(generateAdapter = true)
+data class PocketBaseAuthResponse(
+    @Json(name = "token") val token: String,
+    @Json(name = "record") val record: PocketBaseUser
 )
 
 @JsonClass(generateAdapter = true)
 data class PocketBasePost(
-    val id: String,
-    @Json(name = "user_id") val userId: String? = "",
-    val tipo: String? = "",
-    val especie: String? = "",
-    val tamano: String? = "",
+    @Json(name = "id") val id: String,
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "tipo") val tipo: String, // "perdida", "encontrada", "avistamiento", "en_transito"
+    @Json(name = "especie") val especie: String, // "perro", "gato", "otros"
+    @Json(name = "tamano") val tamano: String, // "pequeño", "mediano", "grande"
     @Json(name = "nombre_mascota") val nombreMascota: String? = "",
-    val descripcion: String? = "",
-    val rasgos: String? = "",
-    val estado: String? = "activo",
-    val fotos: Any? = null,
+    @Json(name = "descripcion") val descripcion: String,
+    @Json(name = "rasgos") val rasgos: String? = "",
+    @Json(name = "estado") val estado: String? = "activo",
+    @Json(name = "fotos") val fotos: List<String>? = emptyList(), // JSON array of photo filenames or single values
     @Json(name = "ubicacion_lat") val ubicacionLat: Double? = 0.0,
     @Json(name = "ubicacion_lng") val ubicacionLng: Double? = 0.0,
-    val distrito: String? = "",
-    val zona: String? = "",
+    @Json(name = "distrito") val distrito: String,
+    @Json(name = "zona") val zona: String? = "",
     @Json(name = "telefono_contacto") val telefonoContacto: String? = "",
-    @Json(name = "telefono_visible") val telefonoVisible: Any? = true,
+    @Json(name = "telefono_visible") val telefonoVisible: Any? = true, // PB can return a boolean or string "true" / "false"
     @Json(name = "likes_count") val likesCount: Int? = 0,
-    val created: String? = "",
-    val expand: Map<String, Any>? = null
+    @Json(name = "user_nombre_completo") val userNombreCompleto: String? = "",
+    @Json(name = "user_foto_perfil") val userFotoPerfil: String? = "",
+    @Json(name = "user_id_expandido") val userIdExpandido: String? = "",
+    @Json(name = "created") val created: String? = ""
 )
-
-fun PocketBasePost.toEntity(): PostEntity {
-    val photosList = when (fotos) {
-        is List<*> -> (fotos as List<*>).filterNotNull().map { it.toString() }
-        is String -> if (fotos.isNotBlank()) listOf(fotos) else emptyList()
-        else -> emptyList()
-    }
-    return PostEntity(
-        id = id,
-        userId = userId ?: "",
-        userNombreCompleto = "",
-        userFotoPerfil = "",
-        tipo = tipo ?: "perdida",
-        especie = especie ?: "perro",
-        tamano = tamano ?: "mediano",
-        nombreMascota = nombreMascota ?: "",
-        descripcion = descripcion ?: "",
-        rasgos = rasgos ?: "",
-        estado = estado ?: "activo",
-        fotosJson = photosList.joinToString(","),
-        ubicacionLat = ubicacionLat ?: 0.0,
-        ubicacionLng = ubicacionLng ?: 0.0,
-        distrito = distrito ?: "San Rafael",
-        zona = zona ?: "",
-        telefonoContacto = telefonoContacto ?: "",
-        telefonoVisible = when (telefonoVisible) {
-            is Boolean -> telefonoVisible
-            is String -> telefonoVisible.toBoolean()
-            else -> true
-        },
-        likesCount = likesCount ?: 0,
-        created = parsePbDate(created)
-    )
-}
-
-fun SupabasePost.toEntity(): PostEntity {
-    val photosList = when (fotos) {
-        is List<*> -> (fotos as List<*>).filterNotNull().map { it.toString() }
-        is String -> if (fotos.isNotBlank()) listOf(fotos) else emptyList()
-        else -> emptyList()
-    }
-    return PostEntity(
-        id = id,
-        userId = userId ?: "",
-        userNombreCompleto = users?.nombre ?: "",
-        userFotoPerfil = users?.fotoPerfil ?: "",
-        tipo = tipo ?: "perdida",
-        especie = especie ?: "perro",
-        tamano = tamano ?: "mediano",
-        nombreMascota = nombreMascota ?: "",
-        descripcion = descripcion ?: "",
-        rasgos = rasgos ?: "",
-        estado = estado ?: "activo",
-        fotosJson = photosList.joinToString(","),
-        ubicacionLat = ubicacionLat ?: 0.0,
-        ubicacionLng = ubicacionLng ?: 0.0,
-        distrito = distrito ?: "San Rafael",
-        zona = zona ?: "",
-        telefonoContacto = telefonoContacto ?: "",
-        telefonoVisible = when (telefonoVisible) {
-            is Boolean -> telefonoVisible
-            is String -> telefonoVisible.toBoolean()
-            else -> true
-        },
-        likesCount = likesCount ?: 0,
-        created = parsePbDate(created)
-    )
-}
 
 @JsonClass(generateAdapter = true)
 data class PocketBaseComment(
-    val id: String,
+    @Json(name = "id") val id: String,
     @Json(name = "post_id") val postId: String,
     @Json(name = "user_id") val userId: String,
-    val texto: String,
-    val created: String? = ""
+    @Json(name = "texto") val texto: String,
+    @Json(name = "user_nombre_completo") val userNombreCompleto: String? = "",
+    @Json(name = "user_foto_perfil") val userFotoPerfil: String? = "",
+    @Json(name = "user_id_expandido") val userIdExpandido: String? = "",
+    @Json(name = "created") val created: String? = ""
 )
 
-fun PocketBaseComment.toEntity() = CommentEntity(
-    id = id,
-    postId = postId,
-    userId = userId,
-    texto = texto,
-    userNombreCompleto = "",
-    userFotoPerfil = "",
-    userIsOng = false,
-    created = parsePbDate(created)
+@JsonClass(generateAdapter = true)
+data class PocketBaseLike(
+    @Json(name = "id") val id: String,
+    @Json(name = "post_id") val postId: String,
+    @Json(name = "user_id") val userId: String
 )
 
-fun SupabaseComment.toEntity() = CommentEntity(
-    id = id,
-    postId = postId,
-    userId = userId,
-    texto = texto,
-    userNombreCompleto = users?.nombre ?: "",
-    userFotoPerfil = users?.fotoPerfil ?: "",
-    userIsOng = false,
-    created = parsePbDate(created)
+@JsonClass(generateAdapter = true)
+data class PocketBaseReport(
+    @Json(name = "id") val id: String,
+    @Json(name = "post_id") val postId: String,
+    @Json(name = "reporter_id") val reporterUserId: String,
+    @Json(name = "razon") val razon: String,
+    @Json(name = "estado") val estado: String? = "pendiente"
+)
+
+@JsonClass(generateAdapter = true)
+data class PocketBaseProfileReport(
+    @Json(name = "id") val id: String,
+    @Json(name = "profile_id") val reportedUserId: String,
+    @Json(name = "reporter_id") val reporterUserId: String,
+    @Json(name = "razon") val razon: String,
+    @Json(name = "estado") val estado: String? = "pendiente"
+)
+
+@JsonClass(generateAdapter = true)
+data class PocketBaseUserStatus(
+    @Json(name = "id") val id: String,
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "texto") val texto: String,
+    @Json(name = "likes_count") val likesCount: Int? = 0,
+    @Json(name = "created") val created: String? = ""
+)
+
+@JsonClass(generateAdapter = true)
+data class PocketBaseStatusLike(
+    @Json(name = "id") val id: String,
+    @Json(name = "status_id") val statusId: String,
+    @Json(name = "user_id") val userId: String
 )
 
 @JsonClass(generateAdapter = true)
 data class PocketBaseVeterinaria(
-    val id: String,
-    val nombre: String,
-    val direccion: String,
-    val telefono: String,
-    val staff: String? = "",
-    val horarios: String? = "",
-    val distrito: String? = "San Rafael",
-    val clasificacion: String? = "Horario Comercio",
+    @Json(name = "id") val id: String,
+    @Json(name = "nombre") val nombre: String,
+    @Json(name = "direccion") val direccion: String,
+    @Json(name = "telefono") val telefono: String,
+    @Json(name = "staff") val staff: String? = "",
+    @Json(name = "horarios") val horarios: String? = "",
+    @Json(name = "distrito") val distrito: String,
+    @Json(name = "clasificacion") val clasificacion: String,
     @Json(name = "ubicacion_lat") val ubicacionLat: Double? = 0.0,
     @Json(name = "ubicacion_lng") val ubicacionLng: Double? = 0.0,
-    val logo: String? = "",
-    val activa: Boolean? = true
-)
-
-fun PocketBaseVeterinaria.toEntity() = VeterinariaEntity(
-    id = id,
-    nombre = nombre,
-    direccion = direccion,
-    telefono = telefono,
-    staff = staff ?: "",
-    horarios = horarios ?: "",
-    distrito = distrito ?: "San Rafael",
-    clasificacion = clasificacion ?: "Horario Comercio",
-    ubicacionLat = ubicacionLat ?: 0.0,
-    ubicacionLng = ubicacionLng ?: 0.0,
-    logo = logo ?: "",
-    activa = activa ?: true
+    @Json(name = "logo") val logo: String? = "",
+    @Json(name = "activa") val activa: Boolean? = true
 )
 
 @JsonClass(generateAdapter = true)
 data class PocketBaseCampaign(
-    val id: String,
-    val titulo: String,
-    val descripcion: String,
+    @Json(name = "id") val id: String,
+    @Json(name = "titulo") val titulo: String,
+    @Json(name = "descripcion") val descripcion: String,
     @Json(name = "imagen_portada") val imagenPortada: String? = "",
     @Json(name = "contenido_detallado") val contenidoDetallado: String? = "",
     @Json(name = "fecha_inicio") val fechaInicio: String? = "",
     @Json(name = "fecha_fin") val fechaFin: String? = "",
-    @Json(name = "ong_id") val ongId: String? = "",
-    @Json(name = "ong_nombre") val ongNombre: String? = "",
-    val estado: String? = "activa",
-    @Json(name = "likes_count") val likesCount: Int? = 0
+    @Json(name = "ong_id") val ongId: String,
+    @Json(name = "estado") val estado: String? = "activa",
+    @Json(name = "likes_count") val likesCount: Int? = 0,
+    @Json(name = "created") val created: String? = ""
 )
 
-fun PocketBaseCampaign.toEntity() = CampaignEntity(
-    id = id,
-    titulo = titulo,
-    descripcion = descripcion,
-    imagenPortada = imagenPortada ?: "",
-    contenidoDetallado = contenidoDetallado ?: "",
-    fechaInicio = fechaInicio ?: "",
-    fechaFin = fechaFin ?: "",
-    ongId = ongId ?: "",
-    ongNombre = ongNombre ?: "",
-    estado = estado ?: "activa",
-    likesCount = likesCount ?: 0
+@JsonClass(generateAdapter = true)
+data class PocketBaseCampaignLike(
+    @Json(name = "id") val id: String,
+    @Json(name = "campaign_id") val campaignId: String,
+    @Json(name = "user_id") val userId: String
 )
 
 @JsonClass(generateAdapter = true)
 data class PocketBaseNews(
-    val id: String,
-    val titular: String,
-    val contenido: String,
-    @Json(name = "autor_id") val autorId: String? = "",
+    @Json(name = "id") val id: String,
+    @Json(name = "titular") val titular: String,
+    @Json(name = "contenido") val contenido: String,
+    @Json(name = "autor_id") val autorId: String,
     @Json(name = "autor_nombre") val autorNombre: String? = "",
     @Json(name = "imagen_portada") val imagenPortada: String? = "",
     @Json(name = "imagen_noticia") val imagenNoticia: String? = "",
-    val created: String? = ""
+    @Json(name = "created") val created: String? = ""
 )
 
-fun PocketBaseNews.toEntity() = NewsEntity(
-    id = id,
-    titular = titular,
-    contenido = contenido,
-    autorId = autorId ?: "",
-    autorNombre = autorNombre ?: "",
-    imagenPortada = imagenPortada ?: "",
-    imagenNoticia = imagenNoticia ?: "",
-    created = parsePbDate(created)
+@JsonClass(generateAdapter = true)
+data class PocketBaseNotification(
+    @Json(name = "id") val id: String,
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "tipo") val tipo: String,
+    @Json(name = "post_id") val postId: String? = "",
+    @Json(name = "comment_id") val commentId: String? = "",
+    @Json(name = "from_user_id") val fromUserId: String? = "",
+    @Json(name = "mensaje") val mensaje: String,
+    @Json(name = "leida") val leida: Boolean? = false,
+    @Json(name = "created") val created: String? = ""
 )
 
 @JsonClass(generateAdapter = true)
 data class PocketBaseColaborador(
-    val id: String,
-    val nombre: String,
-    val descripcion: String,
-    val logo: String? = "",
-    val enlace: String? = "",
-    val telefono: String? = "",
-    val whatsapp: String? = "",
-    val instagram: String? = "",
-    val direccion: String? = ""
+    @Json(name = "id") val id: String,
+    @Json(name = "nombre") val nombre: String,
+    @Json(name = "descripcion") val descripcion: String,
+    @Json(name = "logo") val logo: String? = "",
+    @Json(name = "enlace") val enlace: String? = "",
+    @Json(name = "telefono") val telefono: String? = "",
+    @Json(name = "whatsapp") val whatsapp: String? = "",
+    @Json(name = "instagram") val instagram: String? = "",
+    @Json(name = "direccion") val direccion: String? = ""
 )
+
+@JsonClass(generateAdapter = true)
+data class PocketBaseUserBlock(
+    @Json(name = "id") val id: String,
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "blocked_user_id") val blockedUserId: String,
+    @Json(name = "blocked_user_nombre") val blockedUserNombre: String? = "",
+    @Json(name = "blocked_user_foto") val blockedUserFoto: String? = ""
+)
+
+@JsonClass(generateAdapter = true)
+data class PocketBaseAdminAction(
+    @Json(name = "id") val id: String,
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "accion") val accion: String,
+    @Json(name = "target_id") val targetId: String? = "",
+    @Json(name = "detalles") val detalles: String? = "",
+    @Json(name = "created") val created: String? = ""
+)
+
+@JsonClass(generateAdapter = true)
+data class PocketBaseUserFollow(
+    @Json(name = "id") val id: String,
+    @Json(name = "follower_id") val followerId: String,
+    @Json(name = "following_id") val followingId: String,
+    @Json(name = "created") val created: String? = ""
+)
+
+// --- Mapper Helpers & Extension Functions ---
 
 fun PocketBaseColaborador.toEntity() = ColaboradorEntity(
     id = id,
@@ -328,11 +232,179 @@ fun PocketBaseColaborador.toEntity() = ColaboradorEntity(
     direccion = direccion ?: ""
 )
 
-@JsonClass(generateAdapter = true)
-data class PocketBaseUserStatus(
-    val id: String,
-    @Json(name = "user_id") val userId: String,
-    val texto: String,
-    @Json(name = "likes_count") val likesCount: Int? = 0,
-    val created: String? = ""
+fun PocketBaseUserBlock.toEntity() = UserBlockEntity(
+    id = id,
+    userId = userId,
+    blockedUserId = blockedUserId,
+    blockedUserNombre = blockedUserNombre ?: "",
+    blockedUserFoto = blockedUserFoto ?: ""
 )
+
+fun PocketBaseAdminAction.toEntity() = AdminActionEntity(
+    id = id,
+    userId = userId,
+    accion = accion,
+    targetId = targetId ?: "",
+    detalles = detalles ?: "",
+    created = parsePbDate(created)
+)
+
+fun PocketBaseUserFollow.toEntity() = UserFollowEntity(
+    id = id,
+    followerId = followerId,
+    followingId = followingId,
+    created = parsePbDate(created)
+)
+
+
+fun parsePbDate(dateStr: String?): Long {
+    if (dateStr.isNullOrBlank()) return System.currentTimeMillis()
+    return try {
+        val formats = listOf(
+            "yyyy-MM-dd HH:mm:ss.SSS'Z'",
+            "yyyy-MM-dd HH:mm:ss.SSS",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd'T'HH:mm:ss"
+        )
+        var parsedTime: Long? = null
+        for (fmt in formats) {
+            try {
+                val sdf = SimpleDateFormat(fmt, Locale.US).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }
+                val clean = dateStr.replace("T", " ").replace("Z", "")
+                parsedTime = sdf.parse(clean)?.time
+                if (parsedTime != null) break
+            } catch (e: Exception) {
+                // Try next
+            }
+        }
+        parsedTime ?: System.currentTimeMillis()
+    } catch (e: Exception) {
+        System.currentTimeMillis()
+    }
+}
+
+fun PocketBaseUser.toEntity(): UserEntity {
+    val assignedRol = if (com.example.BuildConfig.ENABLE_TEST_ROLE_MAPPING && email.endsWith("@infoanimals.com", ignoreCase = true)) {
+        when {
+            email.contains("superadmin", ignoreCase = true) -> "super_admin"
+            email.contains("admin", ignoreCase = true) -> "admin"
+            email.contains("ong", ignoreCase = true) -> "ong"
+            else -> rol ?: "user"
+        }
+    } else {
+        val rawRol = rol ?: "user"
+        if (rawRol == "superadmin") "super_admin" else rawRol
+    }
+    return UserEntity(
+        id = id,
+        email = email,
+        nombre = nombre,
+        telefono = telefono ?: "",
+        zonaPrincipal = zonaPrincipal ?: "",
+        rol = assignedRol,
+        bloqueado = bloqueado ?: false,
+        fotoPerfil = fotoPerfil ?: "",
+        fotoPortada = fotoPortada ?: "",
+        biografia = biografia ?: ""
+    )
+}
+
+fun PocketBasePost.toEntity() = PostEntity(
+    id = id,
+    userId = userId,
+    userNombreCompleto = userNombreCompleto ?: "InfoAnimal Vecino",
+    userFotoPerfil = userFotoPerfil ?: "",
+    tipo = tipo,
+    especie = especie,
+    tamano = tamano,
+    nombreMascota = nombreMascota ?: "",
+    descripcion = descripcion,
+    rasgos = rasgos ?: "",
+    estado = estado ?: "activo",
+    fotosJson = fotos?.joinToString(",") ?: "",
+    ubicacionLat = ubicacionLat ?: 0.0,
+    ubicacionLng = ubicacionLng ?: 0.0,
+    distrito = distrito,
+    zona = zona ?: "",
+    telefonoContacto = telefonoContacto ?: "",
+    telefonoVisible = when (telefonoVisible) {
+        is Boolean -> telefonoVisible
+        is String -> telefonoVisible.toBoolean()
+        else -> true
+    },
+    likesCount = likesCount ?: 0,
+    created = parsePbDate(created)
+)
+
+fun PocketBaseComment.toEntity() = CommentEntity(
+    id = id,
+    postId = postId,
+    userId = userId,
+    texto = texto,
+    userNombreCompleto = userNombreCompleto ?: "Vecino",
+    userFotoPerfil = userFotoPerfil ?: "",
+    userIsOng = false, // Resolve at UI if needed
+    created = parsePbDate(created)
+)
+
+fun PocketBaseLike.toEntity() = LikeEntity(
+    id = id,
+    postId = postId,
+    userId = userId
+)
+
+fun PocketBaseVeterinaria.toEntity() = VeterinariaEntity(
+    id = id,
+    nombre = nombre,
+    direccion = direccion,
+    telefono = telefono,
+    staff = staff ?: "",
+    horarios = horarios ?: "",
+    distrito = distrito,
+    clasificacion = clasificacion,
+    ubicacionLat = ubicacionLat ?: 0.0,
+    ubicacionLng = ubicacionLng ?: 0.0,
+    logo = logo ?: "",
+    activa = activa ?: true
+)
+
+fun PocketBaseCampaign.toEntity() = CampaignEntity(
+    id = id,
+    titulo = titulo,
+    descripcion = descripcion,
+    imagenPortada = imagenPortada ?: "",
+    contenidoDetallado = contenidoDetallado ?: "",
+    fechaInicio = fechaInicio ?: "",
+    fechaFin = fechaFin ?: "",
+    ongId = ongId,
+    ongNombre = "Estación ONG",
+    estado = estado ?: "activa",
+    likesCount = likesCount ?: 0
+)
+
+fun PocketBaseNews.toEntity() = NewsEntity(
+    id = id,
+    titular = titular,
+    contenido = contenido,
+    autorId = autorId,
+    autorNombre = autorNombre ?: "InfoAnimal Staff",
+    imagenPortada = imagenPortada ?: "",
+    imagenNoticia = imagenNoticia ?: "",
+    created = parsePbDate(created)
+)
+
+fun PocketBaseNotification.toEntity() = NotificationEntity(
+    id = id,
+    userId = userId,
+    tipo = tipo,
+    postId = postId ?: "",
+    commentId = commentId ?: "",
+    fromUserId = fromUserId ?: "",
+    fromUserNombre = "",
+    mensaje = mensaje,
+    leida = leida ?: false,
+    created = parsePbDate(created)
+)
+

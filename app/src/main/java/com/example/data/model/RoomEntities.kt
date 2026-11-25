@@ -10,7 +10,7 @@ data class UserEntity(
     val nombre: String,
     val telefono: String = "",
     val zonaPrincipal: String = "",
-    val rol: String = "user", // "user", "ong", "admin", "super_admin"
+    val rol: String = "user", // "user", "ong", "admin"
     val bloqueado: Boolean = false,
     val fotoPerfil: String = "",
     val fotoPortada: String = "",
@@ -30,7 +30,7 @@ data class PostEntity(
     val descripcion: String,
     val rasgos: String = "",
     val estado: String = "activo", // "activo", "resuelta"
-    val fotosJson: String = "",
+    val fotosJson: String = "", // comma-separated strings of image names/uris
     val ubicacionLat: Double = 0.0,
     val ubicacionLng: Double = 0.0,
     val distrito: String, // "San Rafael", "General Alvear", "Malargüe"
@@ -55,7 +55,7 @@ data class CommentEntity(
 
 @Entity(tableName = "likes")
 data class LikeEntity(
-    @PrimaryKey val id: String,
+    @PrimaryKey val id: String, // "postId_userId" to preserve uniqueness
     val postId: String,
     val userId: String
 )
@@ -66,7 +66,7 @@ data class ReportEntity(
     val postId: String,
     val reporterUserId: String,
     val razon: String,
-    val estado: String = "pendiente"
+    val estado: String = "pendiente" // "pendiente", "revisado", "resuelto"
 )
 
 @Entity(tableName = "profile_reports")
@@ -91,7 +91,7 @@ data class UserStatusEntity(
 
 @Entity(tableName = "status_likes")
 data class StatusLikeEntity(
-    @PrimaryKey val id: String,
+    @PrimaryKey val id: String, // "statusId_userId"
     val statusId: String,
     val userId: String
 )
@@ -104,8 +104,8 @@ data class VeterinariaEntity(
     val telefono: String,
     val staff: String = "",
     val horarios: String = "",
-    val distrito: String,
-    val clasificacion: String,
+    val distrito: String, // "San Rafael", "General Alvear", "Malargüe"
+    val clasificacion: String, // "Horario Comercio", "Guardia 24hs"
     val ubicacionLat: Double = 0.0,
     val ubicacionLng: Double = 0.0,
     val logo: String = "",
@@ -123,13 +123,13 @@ data class CampaignEntity(
     val fechaFin: String,
     val ongId: String,
     val ongNombre: String,
-    val estado: String = "activa",
+    val estado: String = "activa", // "activa", "inactiva"
     val likesCount: Int = 0
 )
 
 @Entity(tableName = "campaign_likes")
 data class CampaignLikeEntity(
-    @PrimaryKey val id: String,
+    @PrimaryKey val id: String, // "campaignId_userId"
     val campaignId: String,
     val userId: String
 )
@@ -150,7 +150,7 @@ data class NewsEntity(
 data class NotificationEntity(
     @PrimaryKey val id: String,
     val userId: String,
-    val tipo: String,
+    val tipo: String, // "comment", "like", "status_like" etc.
     val postId: String = "",
     val commentId: String = "",
     val fromUserId: String = "",
@@ -175,7 +175,7 @@ data class ColaboradorEntity(
 
 @Entity(tableName = "user_blocks")
 data class UserBlockEntity(
-    @PrimaryKey val id: String,
+    @PrimaryKey val id: String, // "userId_blockedUserId"
     val userId: String,
     val blockedUserId: String,
     val blockedUserNombre: String = "",
@@ -194,8 +194,9 @@ data class AdminActionEntity(
 
 @Entity(tableName = "user_follows")
 data class UserFollowEntity(
-    @PrimaryKey val id: String,
+    @PrimaryKey val id: String, // "${followerId}_${followingId}"
     val followerId: String,
     val followingId: String,
     val created: Long = System.currentTimeMillis()
 )
+
